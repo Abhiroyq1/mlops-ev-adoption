@@ -900,24 +900,103 @@ GET  /model/list  ───────────────► reads models/
 
 ## Running the Test Suite
 
-| Tier | Folder | Speed | Needs CSV |
-|---|---|---|---|
-| Unit | `tests/unit/` | < 5 seconds | No — dependencies mocked |
-| API | `tests/api/` | < 5 seconds | No — services mocked |
-| Integration | `tests/integration/` | 2–5 minutes | Yes — real data, real training |
+### What each tier does
+
+| Tier | Folder | Tests | Speed | Needs CSV | What it checks |
+|---|---|---|---|---|---|
+| Unit | `tests/unit/` | ~120 | < 5 s | No — all deps mocked | Individual functions in isolation |
+| API | `tests/api/` | ~60 | < 5 s | No — services mocked | HTTP routing, status codes, request validation |
+| Integration | `tests/integration/` | ~10 | 2–5 min | Yes — real 50k-row CSV | Full stack: CSV → train → predict → evaluate |
+
+**Total: 189 tests.** Unit and API run in ~8 seconds. Integration tests train real models so they are slow — run them before a release, not on every change.
+
+The `-m integration` marker is registered in `pytest.ini`, which is why the filter works without any extra config.
+
+---
+
+### Step 0 — Activate your environment
 
 ```bash
-# Install dependencies (includes pytest)
+# conda (used in this project)
+conda activate mlops_test
+
+# or if using venv
+source venv/bin/activate       # macOS / Linux
+venv\Scripts\activate          # Windows PowerShell
+```
+
+If you skip this step and run bare `pytest`, you will get `ModuleNotFoundError: No module named 'fastapi'`.
+
+---
+
+### Step 1 — Install dependencies
+
+```bash
 pip install -r requirements.txt
+```
 
-# Fast tests only — recommended during development
-pytest -m "not integration" -v
+This installs both the application packages and `pytest` / `httpx` (used by the test client).
 
-# Integration tests only
-pytest -m integration -v
+---
 
-# All tests
-pytest -v
+### Step 2 — Run the fast tests (unit + API)
+
+Run this during development after every code change. Takes ~8 seconds.
+
+```bash
+# Unit + API together (recommended default)
+pytest tests/unit/ tests/api/ -v --tb=short
+
+# Unit tests only
+pytest tests/unit/ -v --tb=short
+
+# API (HTTP layer) tests only
+pytest tests/api/ -v --tb=short
+
+# Same result using the marker — excludes integration
+pytest -m "not integration" -v --tb=short
+```
+
+Expected output:
+```
+189 passed in 8.26s
+```
+
+---
+
+### Step 3 — Run integration tests (full stack)
+
+Requires the CSV file at `data/global_ev_adoption_behavior_2026.csv`. Trains real models on 40,000 rows — expect 2–5 minutes.
+
+```bash
+pytest tests/integration/ -v --tb=short
+```
+
+Run this before merging to `main` or after any change to the data pipeline, preprocessing, or model artifacts.
+
+---
+
+### Step 4 — Run everything at once
+
+```bash
+pytest -v --tb=short
+```
+
+---
+
+### Useful flags
+
+| Flag | Effect |
+|---|---|
+| `-v` | Verbose — shows each test name as it runs |
+| `--tb=short` | Short traceback on failure — easier to read than the default |
+| `-x` | Stop after the first failure — useful when debugging |
+| `-k "test_train"` | Run only tests whose name matches the pattern |
+| `--co` | Collect and list all tests without running them |
+
+Example — run only tests related to cross-validation:
+```bash
+pytest -k "cross_validate" -v --tb=short
 ```
 
 ---
