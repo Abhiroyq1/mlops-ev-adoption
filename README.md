@@ -315,8 +315,8 @@ Before you start, make sure you have the following installed on your machine.
 
 **Step 1 — Clone the repository**
 ```bash
-git clone <repo-url>
-cd mlops_practise
+git clone https://github.com/Abhiroyq1/mlops-ev-adoption.git
+cd mlops-ev-adoption
 ```
 
 **Step 2 — Install dependencies**
