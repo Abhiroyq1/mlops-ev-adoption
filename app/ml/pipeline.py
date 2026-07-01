@@ -1,15 +1,36 @@
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, LabelEncoder, OrdinalEncoder
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.base import clone
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    GradientBoostingClassifier,
+    ExtraTreesClassifier,
+    AdaBoostClassifier,
+    VotingClassifier,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from app.services.preprocessing import NUMERIC_FEATURES, CATEGORICAL_FEATURES
 
+# SVC with probability=True uses Platt scaling (internal 5-fold CV), so expect
+# longer training time on large datasets (~40K rows). cache_size=500 helps.
 SUPPORTED_MODELS = {
     "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
     "gradient_boosting": GradientBoostingClassifier(n_estimators=100, random_state=42),
     "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
+    "extra_trees": ExtraTreesClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+    "adaboost": AdaBoostClassifier(n_estimators=100, random_state=42),
+    "svm": SVC(kernel="rbf", probability=True, C=1.0, random_state=42, cache_size=500),
+    "voting_soft": VotingClassifier(
+        estimators=[
+            ("rf", RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)),
+            ("gb", GradientBoostingClassifier(n_estimators=50, random_state=42)),
+            ("lr", LogisticRegression(max_iter=500, random_state=42)),
+        ],
+        voting="soft",
+    ),
 }
 
 
@@ -32,7 +53,9 @@ def build_pipeline(model_name: str = "random_forest") -> Pipeline:
         ("cat", categorical_transformer, CATEGORICAL_FEATURES),
     ])
 
+    # clone() gives each pipeline call a fresh unfitted estimator, preventing
+    # shared-instance state bugs when the same model is trained multiple times.
     return Pipeline([
         ("preprocessor", preprocessor),
-        ("classifier", SUPPORTED_MODELS[model_name]),
+        ("classifier", clone(SUPPORTED_MODELS[model_name])),
     ])

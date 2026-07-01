@@ -44,3 +44,14 @@ class MetricsResponse(BaseModel):
     classification_report: dict[str, Any]
     confusion_matrix: list[list[int]]
     classes: list[str]
+
+
+class CrossValidationResponse(BaseModel):
+    model_name: str
+    cv_folds: int
+    cv_scores: list[float]
+    mean_accuracy: float
+    std_accuracy: float
+    min_accuracy: float
+    max_accuracy: float
+    mean_fit_time_seconds: float

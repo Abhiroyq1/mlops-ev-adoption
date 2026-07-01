@@ -9,6 +9,7 @@ from app.schemas.responses import (
     TrainResponse,
     PredictResponse,
     MetricsResponse,
+    CrossValidationResponse,
 )
 
 
@@ -140,3 +141,34 @@ class TestMetricsResponse:
         )
         assert isinstance(r.confusion_matrix, list)
         assert isinstance(r.confusion_matrix[0], list)
+
+
+class TestCrossValidationResponse:
+    def test_valid(self):
+        r = CrossValidationResponse(
+            model_name="random_forest",
+            cv_folds=5,
+            cv_scores=[0.85, 0.87, 0.84, 0.86, 0.88],
+            mean_accuracy=0.86,
+            std_accuracy=0.015,
+            min_accuracy=0.84,
+            max_accuracy=0.88,
+            mean_fit_time_seconds=2.34,
+        )
+        assert r.model_name == "random_forest"
+        assert r.cv_folds == 5
+        assert len(r.cv_scores) == 5
+
+    def test_scores_stored_as_floats(self):
+        r = CrossValidationResponse(
+            model_name="svm", cv_folds=3,
+            cv_scores=[0.9, 0.91, 0.89],
+            mean_accuracy=0.9, std_accuracy=0.01,
+            min_accuracy=0.89, max_accuracy=0.91,
+            mean_fit_time_seconds=5.0,
+        )
+        assert all(isinstance(s, float) for s in r.cv_scores)
+
+    def test_missing_required_field_raises(self):
+        with pytest.raises(Exception):
+            CrossValidationResponse(model_name="rf")
