@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from sklearn.model_selection import train_test_split
 
-from app.services.model_service import train_model, predict, list_trained_models
+from app.services.model_service import train_model, predict, list_trained_models, cross_validate_model
 from app.services.preprocessing import FEATURE_COLUMNS
 from app.ml.pipeline import build_pipeline
 
@@ -118,3 +118,47 @@ class TestListTrainedModels:
             result = list_trained_models()
         assert result == ["random_forest"]
         assert "model" not in result
+
+
+class TestCrossValidateModel:
+    def test_returns_model_name(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        assert result["model_name"] == "logistic_regression"
+
+    def test_returns_correct_fold_count(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        assert result["cv_folds"] == 2
+        assert len(result["cv_scores"]) == 2
+
+    def test_scores_are_floats_in_range(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        for score in result["cv_scores"]:
+            assert 0.0 <= score <= 1.0
+
+    def test_mean_accuracy_within_score_bounds(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        assert result["min_accuracy"] <= result["mean_accuracy"] <= result["max_accuracy"]
+
+    def test_std_is_non_negative(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        assert result["std_accuracy"] >= 0.0
+
+    def test_mean_fit_time_is_positive(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        assert result["mean_fit_time_seconds"] > 0.0
+
+    def test_response_has_all_keys(self, splits):
+        with patch("app.services.model_service.get_splits", return_value=splits):
+            result = cross_validate_model("logistic_regression", cv=2)
+        expected_keys = {
+            "model_name", "cv_folds", "cv_scores",
+            "mean_accuracy", "std_accuracy", "min_accuracy",
+            "max_accuracy", "mean_fit_time_seconds",
+        }
+        assert set(result.keys()) == expected_keys

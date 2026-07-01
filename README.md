@@ -4,7 +4,7 @@ A fully productionized, end-to-end Machine Learning service that predicts Electr
 
 Built with **FastAPI** and **scikit-learn**. Packaged with **Docker**. Tested with **pytest**.
 
-> **Best model accuracy: 85.25%** — Random Forest on a held-out 10,000-record test split.
+> **7 models supported:** Random Forest, Gradient Boosting, Logistic Regression, Extra Trees, AdaBoost, SVM (RBF), and Soft Voting Ensemble. Every model can be trained, cross-validated, predicted, and evaluated through HTTP endpoints.
 
 ---
 
@@ -36,7 +36,7 @@ Most ML projects live in Jupyter notebooks — great for exploration, but not so
 
 This repository takes that same ML work and wraps it into a **proper application**:
 
-- Every step of the ML lifecycle (data exploration → training → prediction → evaluation) is a **callable HTTP API endpoint**
+- Every step of the ML lifecycle (data exploration → training → cross-validation → prediction → evaluation) is a **callable HTTP API endpoint**
 - The app runs as a **server** — anything that can make an HTTP request (Postman, a browser, another service, a frontend) can use it
 - It is packaged as a **Docker container** — one command to build, one command to run, works the same on any machine
 
@@ -47,19 +47,20 @@ Think of it as: *"what does a data science notebook look like after it grows up 
 ## How This Works — The Big Picture
 
 ```
-You (or any client)          FastAPI Server               Files on disk
-─────────────────            ──────────────               ─────────────
+You (or any client)          FastAPI Server                   Files on disk
+─────────────────            ──────────────                   ─────────────
                     HTTP
-  Postman    ─────────────►  /eda/summary       reads ──► CSV dataset
+  Postman    ─────────────►  /eda/summary          reads ──► CSV dataset
   Browser    ◄─────────────  /eda/analysis
   curl                       /data-eng/splits
-                             /model/train       saves ──► models/*.joblib
-                             /model/predict     loads ◄── models/*.joblib
+                             /model/train           saves ──► models/*.joblib
+                             /model/cross-validate  (no artifact — scores only)
+                             /model/predict         loads ◄── models/*.joblib
                              /model/list
-                             /metrics/evaluate  loads ◄── models/*.joblib
+                             /metrics/evaluate      loads ◄── models/*.joblib
 ```
 
-The server holds the dataset in memory after the first read. Trained models are saved as `.joblib` files and loaded on demand. You do not need to write any Python — you just make HTTP requests.
+The server holds the dataset in memory after the first read. Trained models are saved as `.joblib` files and loaded on demand. Cross-validation runs on the training split in memory and returns scores without saving anything. You do not need to write any Python — you just make HTTP requests.
 
 ---
 
@@ -69,12 +70,14 @@ To understand what each API endpoint does, here is the entire application logic 
 
 ```python
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_validate, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, AdaBoostClassifier, VotingClassifier
+from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import joblib
 
@@ -121,6 +124,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 # ── STEP 4: TRAIN THE MODEL ────────────────────────────────────────────────────
 # API: POST /model/train?model_name=random_forest
 # Builds a Pipeline (preprocessing + classifier), fits it, saves to disk.
+# clone() gives each call a fresh estimator — no shared-instance state bugs.
 
 numeric_transformer = Pipeline([
     ("imputer", SimpleImputer(strategy="median")),
@@ -136,7 +140,7 @@ preprocessor = ColumnTransformer([
 ])
 pipeline = Pipeline([
     ("preprocessor", preprocessor),
-    ("classifier", RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)),
+    ("classifier", clone(RandomForestClassifier(n_estimators=100, random_state=42))),
 ])
 
 pipeline.fit(X_train, y_train)
@@ -144,7 +148,19 @@ print("Train accuracy:", pipeline.score(X_train, y_train))  # ~98.9%
 print("Test  accuracy:", pipeline.score(X_test,  y_test))   # ~85.25%
 joblib.dump(pipeline, "models/random_forest.joblib")
 
-# ── STEP 5: PREDICT FOR A NEW PERSON ──────────────────────────────────────────
+# ── STEP 5: CROSS-VALIDATE ────────────────────────────────────────────────────
+# API: POST /model/cross-validate?model_name=extra_trees&cv=5
+# Runs StratifiedKFold CV on the training split. No artifact is saved.
+# Use this to check variance and generalisation before committing to a model.
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+results = cross_validate(pipeline, X_train, y_train, cv=skf, scoring="accuracy", n_jobs=1)
+scores = results["test_score"]
+print(f"CV mean: {scores.mean():.4f}  std: {scores.std():.4f}")
+print(f"Fold scores: {scores.round(4)}")
+print(f"Mean fit time: {results['fit_time'].mean():.2f}s")
+
+# ── STEP 6: PREDICT FOR A NEW PERSON ──────────────────────────────────────────
 # API: POST /model/predict?model_name=random_forest
 # Loads the saved artifact, runs it on one new record.
 
@@ -153,7 +169,7 @@ new_person = pd.DataFrame([{"age": 35, "annual_income": 75000, ...}])
 print(pipeline.predict(new_person)[0])        # "High"
 print(pipeline.predict_proba(new_person)[0])  # [0.72, 0.08, 0.20]
 
-# ── STEP 6: EVALUATE ON THE TEST SET ──────────────────────────────────────────
+# ── STEP 7: EVALUATE ON THE TEST SET ──────────────────────────────────────────
 # API: GET /metrics/evaluate?model_name=random_forest
 # Loads the artifact, scores on the held-out test set — no re-training.
 
@@ -173,8 +189,9 @@ print(confusion_matrix(y_test, y_pred))           # 3×3 matrix
 | Step 2 — EDA (stats) | `GET /eda/analysis` |
 | Step 3 — feature selection | `GET /data-eng/splits` |
 | Step 4 — train | `POST /model/train?model_name=random_forest` |
-| Step 5 — predict | `POST /model/predict?model_name=random_forest` |
-| Step 6 — evaluate | `GET /metrics/evaluate?model_name=random_forest` |
+| Step 5 — cross-validate | `POST /model/cross-validate?model_name=extra_trees&cv=5` |
+| Step 6 — predict | `POST /model/predict?model_name=random_forest` |
+| Step 7 — evaluate | `GET /metrics/evaluate?model_name=random_forest` |
 
 ---
 
@@ -206,14 +223,18 @@ print(confusion_matrix(y_test, y_pred))           # 3×3 matrix
             data/global_ev_adoption_behavior_2026.csv
 
             app/ml/pipeline.py
-            sklearn Pipeline → joblib.dump / joblib.load
+            sklearn Pipeline → clone() → joblib.dump / joblib.load
                                 ▼
             models/random_forest.joblib
             models/gradient_boosting.joblib
             models/logistic_regression.joblib
+            models/extra_trees.joblib
+            models/adaboost.joblib
+            models/svm.joblib
+            models/voting_soft.joblib
 ```
 
-`main.py` mounts four routers via `app.include_router()`. Every route defined in each router file is automatically registered on the `app` object — which is why running `uvicorn app.main:app` gives you all 8 endpoints even though `main.py` itself only has the `/health` route written directly in it.
+`main.py` mounts four routers via `app.include_router()`. Every route defined in each router file is automatically registered on the `app` object — which is why running `uvicorn app.main:app` gives you all endpoints even though `main.py` itself only has the `/health` route written directly in it.
 
 ---
 
@@ -229,18 +250,19 @@ mlops_practise/
 │   ├── routers/                      # HTTP layer — one file per route group
 │   │   ├── eda.py                    # GET /eda/summary, GET /eda/analysis
 │   │   ├── data_engineering.py       # GET /data-eng/splits
-│   │   ├── modeling.py               # POST /model/train, POST /model/predict, GET /model/list
+│   │   ├── modeling.py               # POST /model/train, /model/predict,
+│   │   │                             #      /model/cross-validate, GET /model/list
 │   │   └── metrics.py                # GET /metrics/evaluate
 │   │
 │   ├── services/                     # Business logic — one file per concern
 │   │   ├── data_service.py           # CSV loader with @lru_cache
 │   │   ├── eda_service.py            # Statistical summaries
 │   │   ├── preprocessing.py          # Feature definitions + train/test split
-│   │   ├── model_service.py          # Train, predict, list artifacts
+│   │   ├── model_service.py          # Train, predict, cross-validate, list artifacts
 │   │   └── metrics_service.py        # Accuracy, classification report, confusion matrix
 │   │
 │   ├── ml/
-│   │   └── pipeline.py               # sklearn Pipeline builder + model registry
+│   │   └── pipeline.py               # sklearn Pipeline builder + 7-model registry
 │   │
 │   └── schemas/
 │       ├── requests.py               # Pydantic model for POST /predict body
@@ -420,12 +442,19 @@ Expected response:
 }
 ```
 
-You can also train the other two models (faster):
+**All supported models** — swap the `model_name` query parameter:
 
-```
-POST http://localhost:8000/model/train?model_name=gradient_boosting
-POST http://localhost:8000/model/train?model_name=logistic_regression
-```
+| Model | URL | Training time (approx) |
+|---|---|---|
+| `random_forest` | `POST .../model/train?model_name=random_forest` | 30–60 seconds |
+| `gradient_boosting` | `POST .../model/train?model_name=gradient_boosting` | ~3 minutes |
+| `logistic_regression` | `POST .../model/train?model_name=logistic_regression` | ~10 seconds |
+| `extra_trees` | `POST .../model/train?model_name=extra_trees` | 20–40 seconds |
+| `adaboost` | `POST .../model/train?model_name=adaboost` | ~2 minutes |
+| `svm` | `POST .../model/train?model_name=svm` | **5–15 minutes** — SVM uses Platt scaling internally |
+| `voting_soft` | `POST .../model/train?model_name=voting_soft` | ~5 minutes (trains RF + GB + LR together) |
+
+> **SVM note:** `svm` uses RBF kernel with `probability=True`. On 40,000 rows this triggers internal 5-fold cross-validation (Platt scaling) during training — budget extra time. Start with `extra_trees` or `adaboost` first.
 
 ---
 
@@ -440,12 +469,58 @@ Confirm which models are ready to use.
 
 Expected response:
 ```json
-["random_forest", "logistic_regression"]
+["random_forest", "extra_trees"]
 ```
 
 ---
 
-### Step 6 — Predict for a New Person
+### Step 6 — Cross-Validate a Model
+
+Cross-validation runs **Stratified K-Fold** on the training split and returns per-fold accuracy scores. This is different from train/test accuracy — it shows how stable the model is across different data slices, which is a much better indicator of real-world performance.
+
+No artifact is saved. You can run this before or after training.
+
+| Field | Value |
+|---|---|
+| Method | `POST` |
+| URL | `http://localhost:8000/model/cross-validate?model_name=extra_trees&cv=5` |
+| Body | None |
+
+The `cv` parameter sets the number of folds (2–10, default 5).
+
+Expected response:
+```json
+{
+  "model_name": "extra_trees",
+  "cv_folds": 5,
+  "cv_scores": [0.9312, 0.9298, 0.9341, 0.9287, 0.9320],
+  "mean_accuracy": 0.9312,
+  "std_accuracy": 0.0019,
+  "min_accuracy": 0.9287,
+  "max_accuracy": 0.9341,
+  "mean_fit_time_seconds": 4.23
+}
+```
+
+**How to read this:**
+- `mean_accuracy` — average accuracy across all folds — your headline number
+- `std_accuracy` — low std (< 0.005) means the model is stable and not sensitive to which data it sees
+- `min_accuracy` / `max_accuracy` — the worst and best fold — big gaps indicate instability
+- `mean_fit_time_seconds` — how long each fold takes to train
+
+> **SVM warning:** Cross-validating `svm` runs 5 full SVM training cycles. On 40K rows this can take 30–60 minutes. Use `extra_trees`, `adaboost`, or `logistic_regression` for quick CV comparisons.
+
+You can compare models by running CV on each:
+```
+POST http://localhost:8000/model/cross-validate?model_name=extra_trees
+POST http://localhost:8000/model/cross-validate?model_name=adaboost
+POST http://localhost:8000/model/cross-validate?model_name=logistic_regression
+POST http://localhost:8000/model/cross-validate?model_name=voting_soft
+```
+
+---
+
+### Step 7 — Predict for a New Person
 
 This is a POST request **with a JSON body**. In Postman:
 1. Set Method to `POST`
@@ -504,7 +579,7 @@ Expected response:
 
 ---
 
-### Step 7 — Evaluate Model Metrics
+### Step 8 — Evaluate Model Metrics
 
 Get accuracy, classification report, and confusion matrix for a trained model.
 
@@ -517,7 +592,9 @@ Get accuracy, classification report, and confusion matrix for a trained model.
 To evaluate a different model, change the query parameter:
 ```
 GET http://localhost:8000/metrics/evaluate?model_name=gradient_boosting
-GET http://localhost:8000/metrics/evaluate?model_name=logistic_regression
+GET http://localhost:8000/metrics/evaluate?model_name=extra_trees
+GET http://localhost:8000/metrics/evaluate?model_name=adaboost
+GET http://localhost:8000/metrics/evaluate?model_name=voting_soft
 ```
 
 Expected response (abbreviated):
@@ -645,9 +722,10 @@ Once the container is running (`docker run -p 8000:8000 evadoptionmodel`), **Pos
 
 ```
 http://localhost:8000/health
-http://localhost:8000/model/train?model_name=random_forest
-http://localhost:8000/model/predict?model_name=random_forest
-http://localhost:8000/metrics/evaluate?model_name=random_forest
+http://localhost:8000/model/train?model_name=extra_trees
+http://localhost:8000/model/cross-validate?model_name=extra_trees&cv=5
+http://localhost:8000/model/predict?model_name=extra_trees
+http://localhost:8000/metrics/evaluate?model_name=extra_trees
 ```
 
 The `-p 8000:8000` flag in the run command is what makes this work — it forwards your machine's port 8000 to the container's port 8000. Postman sees no difference.
@@ -665,11 +743,12 @@ Follow the same [Step-by-Step Postman guide](#testing-with-postman--step-by-step
 | GET | `/eda/analysis` | No | Describe, correlation matrix, category value counts |
 | GET | `/data-eng/splits` | No | Feature lists and 40k/10k split sizes |
 | POST | `/model/train` | No | Train a model, save artifact |
+| POST | `/model/cross-validate` | No | Stratified K-Fold CV on training split — no artifact saved |
 | POST | `/model/predict` | Yes — features JSON | Predict EV adoption for one person |
 | GET | `/model/list` | No | List trained model artifacts on disk |
 | GET | `/metrics/evaluate` | No | Accuracy, F1, confusion matrix on test split |
 
-**Supported `model_name` values:** `random_forest` (default), `gradient_boosting`, `logistic_regression`
+**Supported `model_name` values:** `random_forest` (default), `gradient_boosting`, `logistic_regression`, `extra_trees`, `adaboost`, `svm`, `voting_soft`
 
 **Interactive docs:** `http://localhost:8000/docs` — Swagger UI with Try it out buttons for every endpoint.
 
@@ -713,6 +792,20 @@ Follow the same [Step-by-Step Postman guide](#testing-with-postman--step-by-step
   "train_accuracy": 0.9891,
   "test_accuracy": 0.8525,
   "classes": ["High", "Low", "Medium"]
+}
+```
+
+#### `POST /model/cross-validate?model_name=extra_trees&cv=5`
+```json
+{
+  "model_name": "extra_trees",
+  "cv_folds": 5,
+  "cv_scores": [0.9312, 0.9298, 0.9341, 0.9287, 0.9320],
+  "mean_accuracy": 0.9312,
+  "std_accuracy": 0.0019,
+  "min_accuracy": 0.9287,
+  "max_accuracy": 0.9341,
+  "mean_fit_time_seconds": 4.23
 }
 ```
 
@@ -769,18 +862,20 @@ Response:
 You do not have to call endpoints in any fixed order, but these dependencies exist:
 
 ```
-GET /health                     no dependencies — always works
+GET /health                          no dependencies — always works
 
 GET /eda/summary    ─┐
 GET /eda/analysis   ─┤──► loads CSV (cached after first call)
 GET /data-eng/splits─┘
 
-POST /model/train  ──────────► loads CSV → splits data → trains → saves .joblib
+POST /model/train  ──────────────► loads CSV → splits → trains → saves .joblib
 
-POST /model/predict ─────────► requires .joblib file (train first)
-GET  /metrics/evaluate ──────► requires .joblib file (train first) + loads test split
+POST /model/cross-validate ──────► loads CSV → splits → CV on X_train (no artifact)
 
-GET  /model/list  ───────────► reads models/ directory on disk
+POST /model/predict ─────────────► requires .joblib file (train first)
+GET  /metrics/evaluate ──────────► requires .joblib file (train first) + loads test split
+
+GET  /model/list  ───────────────► reads models/ directory on disk
 ```
 
 **Recommended order for a full run:**
@@ -789,37 +884,119 @@ GET  /model/list  ───────────► reads models/ directory o
 2.  GET  /eda/summary
 3.  GET  /eda/analysis
 4.  GET  /data-eng/splits
-5.  POST /model/train?model_name=random_forest
-6.  POST /model/train?model_name=gradient_boosting      (optional)
-7.  POST /model/train?model_name=logistic_regression    (optional)
-8.  GET  /model/list
-9.  POST /model/predict?model_name=random_forest
-10. GET  /metrics/evaluate?model_name=random_forest
-11. GET  /metrics/evaluate?model_name=gradient_boosting (compare)
+5.  POST /model/train?model_name=extra_trees
+6.  POST /model/cross-validate?model_name=extra_trees&cv=5   ← check stability
+7.  POST /model/train?model_name=adaboost                    (optional — compare)
+8.  POST /model/cross-validate?model_name=adaboost           ← compare CV scores
+9.  POST /model/train?model_name=random_forest               (optional)
+10. POST /model/train?model_name=voting_soft                 (optional — ensemble)
+11. GET  /model/list
+12. POST /model/predict?model_name=extra_trees
+13. GET  /metrics/evaluate?model_name=extra_trees
+14. GET  /metrics/evaluate?model_name=random_forest          (compare test accuracy)
 ```
 
 ---
 
 ## Running the Test Suite
 
-| Tier | Folder | Speed | Needs CSV |
-|---|---|---|---|
-| Unit | `tests/unit/` | < 5 seconds | No — dependencies mocked |
-| API | `tests/api/` | < 5 seconds | No — services mocked |
-| Integration | `tests/integration/` | 2–5 minutes | Yes — real data, real training |
+### What each tier does
+
+| Tier | Folder | Tests | Speed | Needs CSV | What it checks |
+|---|---|---|---|---|---|
+| Unit | `tests/unit/` | ~120 | < 5 s | No — all deps mocked | Individual functions in isolation |
+| API | `tests/api/` | ~60 | < 5 s | No — services mocked | HTTP routing, status codes, request validation |
+| Integration | `tests/integration/` | ~10 | 2–5 min | Yes — real 50k-row CSV | Full stack: CSV → train → predict → evaluate |
+
+**Total: 189 tests.** Unit and API run in ~8 seconds. Integration tests train real models so they are slow — run them before a release, not on every change.
+
+The `-m integration` marker is registered in `pytest.ini`, which is why the filter works without any extra config.
+
+---
+
+### Step 0 — Activate your environment
 
 ```bash
-# Install dependencies (includes pytest)
+# conda (used in this project)
+conda activate mlops_test
+
+# or if using venv
+source venv/bin/activate       # macOS / Linux
+venv\Scripts\activate          # Windows PowerShell
+```
+
+If you skip this step and run bare `pytest`, you will get `ModuleNotFoundError: No module named 'fastapi'`.
+
+---
+
+### Step 1 — Install dependencies
+
+```bash
 pip install -r requirements.txt
+```
 
-# Fast tests only — recommended during development
-pytest -m "not integration" -v
+This installs both the application packages and `pytest` / `httpx` (used by the test client).
 
-# Integration tests only
-pytest -m integration -v
+---
 
-# All tests
-pytest -v
+### Step 2 — Run the fast tests (unit + API)
+
+Run this during development after every code change. Takes ~8 seconds.
+
+```bash
+# Unit + API together (recommended default)
+pytest tests/unit/ tests/api/ -v --tb=short
+
+# Unit tests only
+pytest tests/unit/ -v --tb=short
+
+# API (HTTP layer) tests only
+pytest tests/api/ -v --tb=short
+
+# Same result using the marker — excludes integration
+pytest -m "not integration" -v --tb=short
+```
+
+Expected output:
+```
+189 passed in 8.26s
+```
+
+---
+
+### Step 3 — Run integration tests (full stack)
+
+Requires the CSV file at `data/global_ev_adoption_behavior_2026.csv`. Trains real models on 40,000 rows — expect 2–5 minutes.
+
+```bash
+pytest tests/integration/ -v --tb=short
+```
+
+Run this before merging to `main` or after any change to the data pipeline, preprocessing, or model artifacts.
+
+---
+
+### Step 4 — Run everything at once
+
+```bash
+pytest -v --tb=short
+```
+
+---
+
+### Useful flags
+
+| Flag | Effect |
+|---|---|
+| `-v` | Verbose — shows each test name as it runs |
+| `--tb=short` | Short traceback on failure — easier to read than the default |
+| `-x` | Stop after the first failure — useful when debugging |
+| `-k "test_train"` | Run only tests whose name matches the pattern |
+| `--co` | Collect and list all tests without running them |
+
+Example — run only tests related to cross-validation:
+```bash
+pytest -k "cross_validate" -v --tb=short
 ```
 
 ---
@@ -864,13 +1041,26 @@ Declares the 17 numeric and 5 categorical features. Runs a stratified 80/20 `tra
 `build_pipeline(model_name)` returns an sklearn `Pipeline`:
 - Numeric path: `SimpleImputer(median)` → `StandardScaler`
 - Categorical path: `SimpleImputer(most_frequent)` → `OrdinalEncoder`
-- Classifier: one of `RandomForestClassifier`, `GradientBoostingClassifier`, `LogisticRegression`
+- Classifier: one of 7 supported models (see table below)
+
+`clone()` is called on the estimator before adding it to the Pipeline — this gives every training call a fresh unfitted copy, preventing state corruption when the same model is trained multiple times in the same process.
 
 The entire fitted pipeline (scaler + encoder + model) is saved as one `.joblib` file. Loading it for prediction gives back the same transformation chain — no train/serve mismatch.
 
-### `app/services/model_service.py` — Training & Inference
+| Model key | Algorithm | Parallelism | Notes |
+|---|---|---|---|
+| `random_forest` | RandomForestClassifier | `n_jobs=-1` | Robust, fast, good default |
+| `gradient_boosting` | GradientBoostingClassifier | single-threaded | Highest accuracy, slowest |
+| `logistic_regression` | LogisticRegression | single-threaded | Fastest, least overfit |
+| `extra_trees` | ExtraTreesClassifier | `n_jobs=-1` | Faster than RF, similar accuracy |
+| `adaboost` | AdaBoostClassifier | single-threaded | Classic sequential boosting |
+| `svm` | SVC (rbf, probability=True) | single-threaded | Slow on large data (Platt scaling) |
+| `voting_soft` | VotingClassifier (RF+GB+LR) | mixed | Often beats any single model |
+
+### `app/services/model_service.py` — Training, Inference & Cross-Validation
 - `train_model()` — fits the pipeline, scores on both splits, saves artifact
 - `predict()` — loads artifact, wraps input in DataFrame, returns class + probabilities
+- `cross_validate_model()` — runs StratifiedKFold CV on X_train, returns per-fold accuracy, mean, std, and average fit time; no artifact saved
 - `list_trained_models()` — globs `models/*.joblib` for artifact names
 
 ### `app/services/metrics_service.py` — Evaluation
@@ -895,12 +1085,16 @@ Routers are thin wrappers. Each function: parses request → calls one service f
 
 ## Model Performance
 
-Evaluated on the stratified 10,000-record held-out test split.
+Evaluated on the stratified 10,000-record held-out test split. Train first, then call `/metrics/evaluate` to get your exact numbers — the values below are indicative.
 
-| Model | Test Accuracy | Training Time (approx) |
-|---|---|---|
-| Random Forest | **85.25%** | ~45 seconds |
-| Gradient Boosting | Train then `GET /metrics/evaluate?model_name=gradient_boosting` | ~3 minutes |
-| Logistic Regression | Train then `GET /metrics/evaluate?model_name=logistic_regression` | ~10 seconds |
+| Model | Test Accuracy (approx) | Training Time (approx) | Recommended CV folds |
+|---|---|---|---|
+| Random Forest | ~85.3% | 30–60 seconds | 5 |
+| Gradient Boosting | ~84–87% | ~3 minutes | 3 (slower per fold) |
+| Logistic Regression | ~75–78% | ~10 seconds | 5 |
+| Extra Trees | ~84–86% | 20–40 seconds | 5 |
+| AdaBoost | ~80–83% | ~2 minutes | 5 |
+| SVM (RBF) | ~82–85% | 5–15 minutes | 2 (very slow per fold) |
+| Soft Voting | ~85–88% | ~5 minutes | 3 |
 
-Random Forest train accuracy is ~98.9% vs 85.25% test — a gap indicating overfitting typical of deep trees. This can be reduced by tuning `max_depth` or `min_samples_leaf`. Logistic Regression trains fastest and shows the smallest train/test gap. Gradient Boosting sits in between.
+**Reading CV vs test accuracy:** CV mean accuracy runs on the training split (40K rows, fewer per fold). Test accuracy runs on the full held-out 10K. A high CV mean with low std (< 0.005) is a stronger signal than train accuracy alone — it means the model generalises consistently, not just on one lucky split.

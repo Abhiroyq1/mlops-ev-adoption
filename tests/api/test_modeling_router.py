@@ -1,6 +1,10 @@
 import pytest
 from unittest.mock import patch
 
+from app.ml.pipeline import SUPPORTED_MODELS
+
+_ALL_MODEL_NAMES = list(SUPPORTED_MODELS.keys())
+
 _MOCK_TRAIN_RESULT = {
     "model_name": "random_forest",
     "artifact_path": "models/random_forest.joblib",
@@ -55,7 +59,7 @@ class TestTrainEndpoint:
             response = client.post("/model/train")
         assert response.status_code == 500
 
-    @pytest.mark.parametrize("model_name", ["random_forest", "gradient_boosting", "logistic_regression"])
+    @pytest.mark.parametrize("model_name", _ALL_MODEL_NAMES)
     def test_all_supported_model_names_accepted(self, client, model_name):
         with patch("app.routers.modeling.train_model", return_value={**_MOCK_TRAIN_RESULT, "model_name": model_name}):
             response = client.post(f"/model/train?model_name={model_name}")
@@ -125,3 +129,69 @@ class TestListModelsEndpoint:
         with patch("app.routers.modeling.list_trained_models", return_value=[]):
             data = client.get("/model/list").json()
         assert data == []
+
+
+_MOCK_CV_RESULT = {
+    "model_name": "random_forest",
+    "cv_folds": 5,
+    "cv_scores": [0.85, 0.87, 0.84, 0.86, 0.88],
+    "mean_accuracy": 0.86,
+    "std_accuracy": 0.015,
+    "min_accuracy": 0.84,
+    "max_accuracy": 0.88,
+    "mean_fit_time_seconds": 2.34,
+}
+
+
+class TestCrossValidateEndpoint:
+    def test_returns_200_default_params(self, client):
+        with patch("app.routers.modeling.cross_validate_model", return_value=_MOCK_CV_RESULT):
+            response = client.post("/model/cross-validate")
+        assert response.status_code == 200
+
+    def test_response_contains_cv_scores(self, client):
+        with patch("app.routers.modeling.cross_validate_model", return_value=_MOCK_CV_RESULT):
+            data = client.post("/model/cross-validate").json()
+        assert "cv_scores" in data
+        assert len(data["cv_scores"]) == 5
+
+    def test_response_contains_stats(self, client):
+        with patch("app.routers.modeling.cross_validate_model", return_value=_MOCK_CV_RESULT):
+            data = client.post("/model/cross-validate").json()
+        for key in ("mean_accuracy", "std_accuracy", "min_accuracy", "max_accuracy"):
+            assert key in data
+
+    def test_cv_folds_query_param_passed_through(self, client):
+        captured = {}
+
+        def fake_cv(model_name, cv):
+            captured["cv"] = cv
+            return {**_MOCK_CV_RESULT, "cv_folds": cv, "cv_scores": [0.85] * cv}
+
+        with patch("app.routers.modeling.cross_validate_model", side_effect=fake_cv):
+            client.post("/model/cross-validate?cv=3")
+        assert captured["cv"] == 3
+
+    def test_invalid_model_name_returns_422(self, client):
+        response = client.post("/model/cross-validate?model_name=xgboost")
+        assert response.status_code == 422
+
+    def test_cv_below_minimum_returns_422(self, client):
+        response = client.post("/model/cross-validate?cv=1")
+        assert response.status_code == 422
+
+    def test_cv_above_maximum_returns_422(self, client):
+        response = client.post("/model/cross-validate?cv=11")
+        assert response.status_code == 422
+
+    def test_service_error_returns_500(self, client):
+        with patch("app.routers.modeling.cross_validate_model", side_effect=RuntimeError("cv failed")):
+            response = client.post("/model/cross-validate")
+        assert response.status_code == 500
+
+    @pytest.mark.parametrize("model_name", _ALL_MODEL_NAMES)
+    def test_all_model_names_accepted(self, client, model_name):
+        with patch("app.routers.modeling.cross_validate_model",
+                   return_value={**_MOCK_CV_RESULT, "model_name": model_name}):
+            response = client.post(f"/model/cross-validate?model_name={model_name}")
+        assert response.status_code == 200

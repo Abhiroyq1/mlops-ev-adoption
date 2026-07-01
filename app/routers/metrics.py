@@ -6,8 +6,17 @@ from app.ml.pipeline import SUPPORTED_MODELS
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
 
+def _check_model_name(model_name: str) -> None:
+    if model_name not in SUPPORTED_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model_name '{model_name}' is not supported. Choose from: {list(SUPPORTED_MODELS)}",
+        )
+
+
 @router.get("/evaluate", response_model=MetricsResponse)
 def evaluate(model_name: str = Query(default="random_forest", enum=list(SUPPORTED_MODELS))):
+    _check_model_name(model_name)
     try:
         return compute_metrics(model_name)
     except FileNotFoundError as e:

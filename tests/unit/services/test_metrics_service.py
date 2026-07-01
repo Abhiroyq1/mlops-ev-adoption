@@ -59,12 +59,12 @@ class TestComputeMetrics:
 
     def test_confusion_matrix_row_sums_equal_test_size(self, trained_setup):
         tmp_path, splits = trained_setup
-        _, (_, X_test, _, _) = trained_setup[0], trained_setup
         with patch("app.services.metrics_service.MODELS_DIR", tmp_path), \
              patch("app.services.metrics_service.get_splits", return_value=splits):
             result = compute_metrics("logistic_regression")
         total = sum(sum(row) for row in result["confusion_matrix"])
-        assert total == len(splits[1])  # X_test length
+        _, X_test, _, _ = splits
+        assert total == len(X_test)
 
     def test_classes_are_valid_labels(self, trained_setup):
         tmp_path, splits = trained_setup

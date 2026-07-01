@@ -1,29 +1,44 @@
 import pytest
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.base import clone
+from sklearn.ensemble import (
+    RandomForestClassifier, GradientBoostingClassifier,
+    ExtraTreesClassifier, AdaBoostClassifier, VotingClassifier,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 
 from app.ml.pipeline import build_pipeline, SUPPORTED_MODELS
 from app.services.preprocessing import FEATURE_COLUMNS
 
+_ALL_MODEL_NAMES = list(SUPPORTED_MODELS.keys())
+
 
 class TestSupportedModels:
-    def test_registry_has_three_models(self):
-        assert len(SUPPORTED_MODELS) == 3
+    def test_registry_has_seven_models(self):
+        assert len(SUPPORTED_MODELS) == 7
 
-    def test_random_forest_present(self):
-        assert "random_forest" in SUPPORTED_MODELS
-
-    def test_gradient_boosting_present(self):
-        assert "gradient_boosting" in SUPPORTED_MODELS
-
-    def test_logistic_regression_present(self):
-        assert "logistic_regression" in SUPPORTED_MODELS
+    def test_all_expected_keys_present(self):
+        expected = {
+            "random_forest", "gradient_boosting", "logistic_regression",
+            "extra_trees", "adaboost", "svm", "voting_soft",
+        }
+        assert set(SUPPORTED_MODELS.keys()) == expected
 
     def test_model_types(self):
         assert isinstance(SUPPORTED_MODELS["random_forest"], RandomForestClassifier)
         assert isinstance(SUPPORTED_MODELS["gradient_boosting"], GradientBoostingClassifier)
         assert isinstance(SUPPORTED_MODELS["logistic_regression"], LogisticRegression)
+        assert isinstance(SUPPORTED_MODELS["extra_trees"], ExtraTreesClassifier)
+        assert isinstance(SUPPORTED_MODELS["adaboost"], AdaBoostClassifier)
+        assert isinstance(SUPPORTED_MODELS["svm"], SVC)
+        assert isinstance(SUPPORTED_MODELS["voting_soft"], VotingClassifier)
+
+    def test_svm_has_probability_enabled(self):
+        assert SUPPORTED_MODELS["svm"].probability is True
+
+    def test_voting_soft_uses_soft_voting(self):
+        assert SUPPORTED_MODELS["voting_soft"].voting == "soft"
 
 
 class TestBuildPipeline:
@@ -31,10 +46,15 @@ class TestBuildPipeline:
         pipeline = build_pipeline("random_forest")
         assert isinstance(pipeline, Pipeline)
 
-    @pytest.mark.parametrize("model_name", ["random_forest", "gradient_boosting", "logistic_regression"])
+    @pytest.mark.parametrize("model_name", _ALL_MODEL_NAMES)
     def test_all_models_build_successfully(self, model_name):
         pipeline = build_pipeline(model_name)
         assert isinstance(pipeline, Pipeline)
+
+    def test_build_pipeline_returns_fresh_clone(self):
+        p1 = build_pipeline("random_forest")
+        p2 = build_pipeline("random_forest")
+        assert p1["classifier"] is not p2["classifier"]
 
     def test_pipeline_has_preprocessor_step(self):
         pipeline = build_pipeline("random_forest")
