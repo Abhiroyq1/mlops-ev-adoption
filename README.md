@@ -2,6 +2,8 @@
 
 A fully productionized, end-to-end Machine Learning service that predicts Electric Vehicle (EV) adoption likelihood — **High**, **Medium**, or **Low** — based on a person's demographic, financial, behavioural, and infrastructure profile.
 
+Dataset - [text](https://www.kaggle.com/datasets/aiexplorer77/from-fuel-to-electric-the-ev-transition-dataset/data)
+
 Built with **FastAPI** and **scikit-learn**. Packaged with **Docker**. Tested with **pytest**.
 
 > **7 models supported:** Random Forest, Gradient Boosting, Logistic Regression, Extra Trees, AdaBoost, SVM (RBF), and Soft Voting Ensemble. Every model can be trained, cross-validated, predicted, and evaluated through HTTP endpoints.
